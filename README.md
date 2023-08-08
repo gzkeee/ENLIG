@@ -13,11 +13,11 @@ In this paper, we introduces a novel knowledge representation approach that effe
    
 2. **Software Configuration:**
 - Operating System: Ubuntu 20.04 LTS
-   
+  
 - Programming Language: Python 3.8
-   
+  
 - Deep Learning Frameworks: PyTorch 1.9.0
-   
+  
 - Huggingface Transformers 4.31.0
 
 ## Experience
@@ -25,13 +25,13 @@ In this paper, we introduces a novel knowledge representation approach that effe
 ### Prepare Pre-train Data
 
 ```bash
-python3 code/process_data.py
+python3 process_data.py
 ```
 
 ### Pretrain
 
 ````bash
-python3 code/pretrain.py
+python3 pretrain.py
 ````
 
 ### Fine-tuning on Downstream Tasks
@@ -39,18 +39,18 @@ python3 code/pretrain.py
 #### Relation Extraction
 
 ````bash
-python3 code/run_fewrel.py
+python3 run_fewrel.py
 ````
 
 #### Entity Typing
 
 ```bash
-python3 code/run_typing.py
+python3 run_typing.py
 ```
 
 #### Question Answering over KG
 
 ```bash
-python3 code/run_metaQA.py
+python3 run_metaQA.py
 ```
 
