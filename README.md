@@ -12,13 +12,13 @@ In this paper, we introduces a novel knowledge representation approach that effe
    - Storage: 1 TB NVMe SSD
    
 2. **Software Configuration:**
-- Operating System: Ubuntu 20.04 LTS
-  
-- Programming Language: Python 3.8
-  
-- Deep Learning Frameworks: PyTorch 1.9.0
-  
-- Huggingface Transformers 4.31.0
+	- Operating System: Ubuntu 20.04 LTS
+    
+	- Programming Language: Python 3.8
+    
+	- Deep Learning Frameworks: PyTorch 1.9.0
+    
+	- Huggingface Transformers 4.31.0
 
 ## Experience
 
