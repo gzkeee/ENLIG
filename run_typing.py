@@ -1,5 +1,4 @@
 import random
-
 from util import load_file, save_file, load_json, get_csr, get_csc, save_json
 import torch
 from torch.utils.data import TensorDataset, DataLoader
@@ -7,7 +6,7 @@ from tqdm import tqdm
 from model import OpenEntityTrainModel
 from line_graph_util import get_graph
 import dgl
-
+import argparse
 
 def accuracy(out, l):
     cnt = 0
@@ -243,6 +242,43 @@ def collect_Q():
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--data_dir",
+                        default=None,
+                        type=str,
+                        required=True,
+                        help="The input data dir. Should contain the .tsv files (or other data files) for the task.")
+    parser.add_argument("--max_seq_length",
+                        default=128,
+                        type=int,
+                        help="The maximum total input sequence length after WordPiece tokenization. \n"
+                             "Sequences longer than this will be truncated, and sequences shorter \n"
+                             "than this will be padded.")
+    parser.add_argument("--train_batch_size",
+                        default=32,
+                        type=int,
+                        help="Total batch size for training.")
+    parser.add_argument("--learning_rate",
+                        default=5e-5,
+                        type=float,
+                        help="The initial learning rate for Adam.")
+    parser.add_argument("--num_train_epochs",
+                        default=3.0,
+                        type=float,
+                        help="Total number of training epochs to perform.")
+    parser.add_argument('--seed',
+                        type=int,
+                        default=42,
+                        help="random seed for initialization")
+    parser.add_argument('--gradient_accumulation_steps',
+                        type=int,
+                        default=1,
+                        help="Number of updates steps to accumulate before performing a backward/update pass.")
+    parser.add_argument('--threshold', type=float, default=.3)
+
+    args = parser.parse_args()
+
     ent2id = load_json('./data/ent2id_.json')
     # print(ent2id[-1])
     # exit()
@@ -257,16 +293,9 @@ if __name__ == '__main__':
 
 
     ent_fewrel = set(load_file('./data/fewrel_ents'))
-    # print(ent_fewrel)
-    # ent_open = set(ent_train+ent_test)
-    # print(ent_fewrel&ent_open)
-    # print(len(ent_fewrel&ent_open))
 
     ent_open = collect_Q()
-    # print(len(set(ent_open)))
-    # # print(ent_open)
 
-    #
     label_train = data_train[-1]
     label_eval = data_eval[-1]
     labels = torch.cat([label_train, label_eval])
@@ -277,7 +306,6 @@ if __name__ == '__main__':
     ent_test = collect_test_ent(thre, ent2id)
     ent_train = torch.tensor(ent_train).unsqueeze(dim=1)
     ent_test = torch.tensor(ent_test).unsqueeze(dim=1)
-
 
     epoch = 15
     for i in range(epoch):
