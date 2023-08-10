@@ -7,6 +7,10 @@ import torch.utils.data as Data
 import evaluate
 from model import GraphEncoder
 from torch import nn
+import argparse
+from scipy.sparse import coo_matrix, csr_matrix, csc_matrix
+from line_graph_util import get_graph, get_graph_2h
+import dgl
 
 def f1():
     f = open('../kb_entity_dict.txt', 'r')
@@ -338,11 +342,6 @@ def train(model, dataset, ent2graph):
             loss_print = 0
 
 
-from scipy.sparse import coo_matrix, csr_matrix, csc_matrix
-from line_graph_util import get_graph, get_graph_2h
-import dgl
-
-
 def create_coo(kg, rel2id, ent2id):
     row = []
     col = []
@@ -498,7 +497,44 @@ def data_transfer(ents, ent2graph):
         g_batch.append(g)
     return dgl.batch(g_batch)
 
+
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--data_dir",
+                        default=None,
+                        type=str,
+                        required=True,
+                        help="The input data dir. Should contain the .tsv files (or other data files) for the task.")
+    parser.add_argument("--max_seq_length",
+                        default=128,
+                        type=int,
+                        help="The maximum total input sequence length after WordPiece tokenization. \n"
+                             "Sequences longer than this will be truncated, and sequences shorter \n"
+                             "than this will be padded.")
+    parser.add_argument("--train_batch_size",
+                        default=32,
+                        type=int,
+                        help="Total batch size for training.")
+    parser.add_argument("--learning_rate",
+                        default=5e-5,
+                        type=float,
+                        help="The initial learning rate for Adam.")
+    parser.add_argument("--num_train_epochs",
+                        default=3.0,
+                        type=float,
+                        help="Total number of training epochs to perform.")
+    parser.add_argument('--seed',
+                        type=int,
+                        default=42,
+                        help="random seed for initialization")
+    parser.add_argument('--gradient_accumulation_steps',
+                        type=int,
+                        default=1,
+                        help="Number of updates steps to accumulate before performing a backward/update pass.")
+
+    args = parser.parse_args()
+
     ent2graph = load_file('./ent2graph_metaQA')
     model = TrainModel()
     # model.apply(weight_load)

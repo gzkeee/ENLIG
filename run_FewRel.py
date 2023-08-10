@@ -10,6 +10,8 @@ from util import save_file, load_file, get_csr, get_csc
 import json
 import os
 from transformers import AutoTokenizer
+import argparse
+from transformers import set_seed
 
 
 class InputExample(object):
@@ -393,10 +395,49 @@ class F1metrics:
             return f1_score, (self.TP,self.FP,self.TN,self.FN)
 
 
-
-
 if __name__ == '__main__':
-    # get_ent2graph()
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--data_dir",
+                        default=None,
+                        type=str,
+                        required=True,
+                        help="The input data dir. Should contain the .tsv files (or other data files) for the task.")
+    parser.add_argument("--max_seq_length",
+                        default=128,
+                        type=int,
+                        help="The maximum total input sequence length after WordPiece tokenization. \n"
+                             "Sequences longer than this will be truncated, and sequences shorter \n"
+                             "than this will be padded.")
+    parser.add_argument("--train_batch_size",
+                        default=32,
+                        type=int,
+                        help="Total batch size for training.")
+    parser.add_argument("--learning_rate",
+                        default=5e-5,
+                        type=float,
+                        help="The initial learning rate for Adam.")
+    parser.add_argument("--num_train_epochs",
+                        default=3.0,
+                        type=float,
+                        help="Total number of training epochs to perform.")
+    parser.add_argument('--seed',
+                        type=int,
+                        default=42,
+                        help="random seed for initialization")
+    parser.add_argument('--gradient_accumulation_steps',
+                        type=int,
+                        default=1,
+                        help="Number of updates steps to accumulate before performing a backward/update pass.")
+    parser.add_argument('--threshold', type=float, default=.3)
+
+    args = parser.parse_args()
+
+    print(args)
+    print(args.data_dir)
+    exit()
+
+
     model = FewRelTrainModel()
 
     rel2idx = load_json('./data/rel2id_wiki.json')
