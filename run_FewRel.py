@@ -190,11 +190,6 @@ def train(model, train_data, ent_data, ent2graph):
         input_ids, attention_mask, token_type_ids, h_pos, t_pos, _, head_id, tail_id, label = item
         head_id = data_transfer(head_id, ent2graph).to(device)
         tail_id = data_transfer(tail_id, ent2graph).to(device)
-
-        # head_pos = torch.argwhere(input_ids == 1001)[:, 1][::2]-1
-        # head_pos = head_pos.unsqueeze(dim=1)
-        # tail_pos = torch.argwhere(input_ids == 1002)[:, 1][::2]-1
-        # tail_pos = tail_pos.unsqueeze(dim=1)
         h_pos = h_pos.unsqueeze(dim=1)
         t_pos = t_pos.unsqueeze(dim=1)
         # exit()
