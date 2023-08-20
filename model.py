@@ -1,23 +1,8 @@
 import dgl
 import torch
 import torch.nn as nn
-import dgl.function as fn
 from transformers import BertForSequenceClassification, BertTokenizer
 import torch.nn.functional as F
-
-class Conv(nn.Module):
-    def __init__(self, hidden_size):
-        super(Conv, self).__init__()
-        self.pattern_embedding = nn.Embedding(10, hidden_size)
-
-    def forward(self, g, rel):
-        with g.local_scope():
-            g.ndata['h'] = rel
-            g.edata['p'] = self.pattern_embedding(g.edata['idx'].long())
-            g.update_all(message_func=fn.u_mul_e('h', 'p', 'm'), reduce_func=fn.mean('m', 'h_N'))
-            h_N = g.ndata['h_N']
-            return h_N+rel
-
 
 class ConvAT(nn.Module):
     def __init__(self, in_dim, out_dim):
@@ -31,7 +16,7 @@ class ConvAT(nn.Module):
         dst = self.fc(edges.dst["h"])
         z2 = torch.cat([z1, dst], dim=1)
         a = self.attn_fc(z2)
-        return {"e": F.leaky_relu(a), 'm': z1}
+        return {"e": F.relu(a), 'm': z1}
 
     def message_func(self, edges):
         # message UDF for equation (3) & (4)
@@ -50,7 +35,6 @@ class ConvAT(nn.Module):
             g.ndata['h'] = rel
             g.edata['p'] = pattern
             g.apply_edges(self.edge_attention)
-            # update_all is a message passing API.
             g.update_all(self.message_func, self.reduce_func)
             # h_N = g.ndata['h_N']
             # h_total = torch.cat([rel, h_N], dim=1)
@@ -75,7 +59,7 @@ class GraphEncoder(nn.Module):
     def __init__(self, in_feats=768, hidden_size=768):
         super(GraphEncoder, self).__init__()
         # self.conv1 = ConvAT(in_feats, hidden_size)
-        self.conv1 = MultiHeadGATLayer(in_feats, hidden_size, 4)
+        self.conv1 = MultiHeadGATLayer(in_feats, hidden_size, 1)
         self.rel_embedding = nn.Embedding(825, hidden_size, padding_idx=0)
         self.pattern_embedding = nn.Embedding(10, hidden_size)
         nn.init.constant_(self.rel_embedding.weight, 0.)
@@ -99,16 +83,17 @@ class TrainModel(torch.nn.Module):
         self.model = BertForSequenceClassification.from_pretrained('bert-base-uncased', problem_type="single_label_classification",
                                                           num_labels=825)
         self.ent_embedding = GraphEncoder()
+        self.token_embedding = self.model.bert.get_input_embeddings()
+        # print(self.cls_embedding.size())
 
     def forward(self, h_graph, t_graph, labels):
-        head_embed = self.ent_embedding(h_graph)
-        tail_embed = self.ent_embedding(t_graph)
-        input_embed = torch.stack([head_embed, tail_embed], dim=1)
+        head_embedding = self.ent_embedding(h_graph)
+        tail_embedding = self.ent_embedding(t_graph)
+        cls_embedding = self.token_embedding(torch.ones((head_embedding.size()[0]),
+                                                        dtype=torch.long).to(head_embedding.device)*101)
+        input_embed = torch.stack([cls_embedding, head_embedding, tail_embedding], dim=1)
         res = self.model(inputs_embeds=input_embed, labels=labels)
         return res
-
-
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
 
 class FewRelTrainModel(torch.nn.Module):
@@ -152,13 +137,18 @@ class OpenEntityTrainModel(torch.nn.Module):
 
     # head # id=1001
     # tail $ id=1002
-    def forward(self, input_ids, token_type_ids, attention_mask, labels, h_id):
+    def forward(self, input_ids, token_type_ids, attention_mask, labels, h_id, pos):
+        bsz = input_ids.size()[0]
+        pos_id = torch.arange(1, 127).expand((bsz, -1)).to('cuda')
+        # print(pos.size())
+        pos_cls = torch.zeros((bsz, 1)).to('cuda')
+        pos_id = torch.cat([pos_cls, pos, pos_id], dim=1).long()
         input_embed = self.token_embedding(input_ids)
         head_embed = self.ent_embedding(h_id)
         # print(head_embed.size())
         input_embed[:, 1] = head_embed
         res = self.model(inputs_embeds=input_embed, attention_mask=attention_mask,
-            token_type_ids=token_type_ids, labels=labels)
+            token_type_ids=token_type_ids, position_ids=pos_id, labels=labels.float())
         return res
 
 
@@ -169,9 +159,7 @@ def weigth_init(m):
 
 
 if __name__ == '__main__':
-    model = TrainModel()
-    model.apply(weigth_init)
-    # model.apply(weight_load)
+    pass
 
 
 

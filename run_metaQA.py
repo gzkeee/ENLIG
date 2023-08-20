@@ -1,19 +1,15 @@
 import networkx as nx
-from util import save_json, save_file, load_file, load_json
+from util import save_json, save_file, load_file, load_json, get_graph, get_graph_2h
 from tqdm import tqdm
 import torch
 from transformers import BertForTokenClassification, set_seed, BertTokenizer
 import torch.utils.data as Data
-import evaluate
 from model import GraphEncoder
-from torch import nn
 import argparse
-from scipy.sparse import coo_matrix, csr_matrix, csc_matrix
-from line_graph_util import get_graph, get_graph_2h
 import dgl
 
 def f1():
-    f = open('../kb_entity_dict.txt', 'r')
+    f = open('./data/metaQA/kb_entity_dict.txt', 'r')
     ent2id = {}
     id2ent = {}
     for item in f:
@@ -21,13 +17,13 @@ def f1():
         # 将0作为空位
         ent2id[item[1]] = int(item[0])+1
         id2ent[int(item[0])+1] = item[1]
-    save_json(ent2id, '../ent2id.json')
-    save_json(id2ent, '../id2ent.json')
+    save_json(ent2id, './data/metaQA/ent2id.json')
+    save_json(id2ent, './data/metaQA/id2ent.json')
 
 
 # 创建rel2id以及id2rel
 def f2():
-    f = open('../kb.txt', 'r')
+    f = open('./data/metaQA/kb.txt', 'r')
     rel2id = {}
     id2rel = {}
     all_relations = []
@@ -40,20 +36,20 @@ def f2():
         # 将0作为空位
         rel2id[rel] = idx+1
         id2rel[idx+1] = rel
-    save_json(rel2id, '../rel2id.json')
-    save_json(id2rel, '../id2rel.json')
+    save_json(rel2id, './data/metaQA/rel2id.json')
+    save_json(id2rel, './data/metaQA/id2rel.json')
 
 
 # 将知识图谱转化为图
 # 50%的KG
 def f3():
-    f = open('./data/kb.txt', 'r')
+    f = open('./data/metaQA/kb.txt', 'r')
     biG = nx.MultiDiGraph()
     for item in list(f)[::2]:
         item = item.strip().split('|')
         item[1] = item[1].replace('_', ' ')
         biG.add_edge(item[0], item[2], relation=item[1])
-    save_file(biG, './data/biG_f_0.5')
+    save_file(biG, './data/metaQA/biG_f_0.5')
     # nx.write_gml(biG, './data/metaQA/biG')
 
 
@@ -78,7 +74,7 @@ def f4():
 
 # 创建id2triple
 def f5():
-    f = open('./kb.txt', 'r')
+    f = open('./data/metaQA/kb.txt', 'r')
     f = list(f)
     id2triple = {}
     triple2id = {}
@@ -88,15 +84,15 @@ def f5():
         id2triple[idx] = (item[0], item[1], item[2])
         triple2id[' '.join([item[0], item[1], item[2]])] = idx
 
-    save_json(id2triple, './id2triple.json')
-    save_json(triple2id, './triple2id.json')
+    save_json(id2triple, './data/metaQA/id2triple.json')
+    save_json(triple2id, './data/metaQA/triple2id.json')
 
 
 # 创建ent2rel
 def f6():
-    kg = open('../kb.txt')
-    rel2id = load_json('../rel2id.json')
-    ent2id = load_json('../ent2id.json')
+    kg = open('./data/metaQA/kb.txt')
+    rel2id = load_json('./data/metaQA/rel2id.json')
+    ent2id = load_json('./data/metaQA/ent2id.json')
     rel_num = len(rel2id)
     ent2rel = {}
 
@@ -143,15 +139,15 @@ def ret_triple_with_ent(ent, graph):
     return know
 
 
-def encode_text_hop1(tag='train'):
+def encode_text_hop1(tag, args):
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    ent2id = load_json('./data/ent2id.json')
-    flist = list(open(f'./data/qa_{tag}.txt', 'r'))
-    graph = load_file('./data/biG_f')
+    ent2id = load_json(f'{args.data_dir}/ent2id.json')
+    flist = list(open(f'{args.data_dir}/qa_{tag}.txt', 'r'))
+    graph = load_file(f'{args.data_dir}/biG_f')
     # num_labels = len(ent2id.keys())
     # 假设一个问题最多只有max_k个triple
     max_k = 64
-    max_len = 128
+    max_len = args.max_seq_length
     all_labels = torch.ones(len(flist), max_len)*-100
     all_ents = torch.ones(len(flist), max_k)*-1
     all_question = []
@@ -199,7 +195,6 @@ def encode_text_hop1(tag='train'):
                     return_tensors='pt')
 
     return [input.input_ids, input.attention_mask, input.token_type_ids, all_labels, all_ents]
-
 
 
 def encode_text_hop2(tag='train'):
@@ -299,16 +294,16 @@ class TrainModel(torch.nn.Module):
         return res
 
 
-def train(model, dataset, ent2graph):
+def train(model, dataset, ent2graph, args):
     device = 'cuda'
-    bsz = 4
+    bsz = args.train_batch_size
     accumulation_steps = 32/bsz
+    lr = args.learning_rate
     dataset = Data.TensorDataset(*dataset)
     load = Data.DataLoader(dataset, batch_size=bsz, shuffle=True)
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_print = 0
-    accuracy_metric = evaluate.load("accuracy")
     hit1 = 0
     for idx, item in enumerate(tqdm(load)):
         item = [i.to(device) for i in item]
@@ -340,80 +335,40 @@ def train(model, dataset, ent2graph):
             print(loss_print)
             hit1 = 0
             loss_print = 0
+            break
 
 
-def create_coo(kg, rel2id, ent2id):
-    row = []
-    col = []
-    data = []
-    for triple in tqdm(list(kg)):
-        triple = triple.strip()
-        h, r, t = triple.split('|')
-        row.append(ent2id[h])
-        col.append(ent2id[t])
-        data.append(rel2id[r])
+def eval(model, dataset, ent2graph):
+    device = 'cuda'
+    bsz = 4
+    dataset = Data.TensorDataset(*dataset)
+    load = Data.DataLoader(dataset, batch_size=bsz, shuffle=True)
+    model = model.to(device)
+    hit1 = 0
+    for idx, item in enumerate(tqdm(load)):
+        with torch.no_grad():
+            item = [i.to(device) for i in item]
+            input_ids, attention_mask, token_type_ids, labels, ents = item
+            ents = data_transfer(ents, ent2graph).to(device)
+            res = model(input_ids, attention_mask, token_type_ids, labels.long(), ents)
+            logits = res.logits
 
-    coo = coo_matrix((data, (row, col)), shape=(len(ent2id)+1, len(ent2id)+1))
-    return coo
-
-
-def compressed_csr(coo):
-    row = []
-    col = []
-    data = []
-    csr = csr_matrix(coo)
-    ent_num = coo.shape[0]
-    for e in tqdm(range(ent_num)):
-        row_e = csr.getrow(e)
-        rel = []
-        for i in range(len(row_e.indices)):
-            if row_e.data[i] not in rel:
-                row.append(e)
-                col.append(row_e.indices[i])
-                data.append(row_e.data[i])
-                rel.append(row_e.data[i])
-    coo = coo_matrix((data, (row, col)), shape=(ent_num, ent_num))
-    compressed_csr = csr_matrix(coo)
-    return compressed_csr
-
-
-def compressed_csc(coo):
-    row = []
-    col = []
-    data = []
-    csc = csc_matrix(coo)
-    ent_num = coo.shape[0]
-    for e in tqdm(range(ent_num)):
-        col_e = csc.getcol(e)
-        rel = []
-        for i in range(len(col_e.indices)):
-            if col_e.data[i] not in rel:
-                col.append(e)
-                row.append(col_e.indices[i])
-                data.append(col_e.data[i])
-                rel.append(col_e.data[i])
-    coo = coo_matrix((data, (row, col)), shape=(ent_num, ent_num))
-    compressed_csc = csc_matrix(coo)
-    return compressed_csc
-
-
-def prepare():
-    kg = open('./data/kb.txt')
-    rel2id = load_json('./data/rel2id.json')
-    ent2id = load_json('./data/ent2id.json')
-    coo = create_coo(list(kg)[::2], rel2id, ent2id)
-    csc = compressed_csc(coo)
-    csr = compressed_csr(coo)
-    save_file(coo, './data/coo_0.5')
-    save_file(csc, './data/csc_0.5')
-    save_file(csr, './data/csr_0.5')
+            for i in range(len(input_ids)):
+                sel = labels[i] != -100
+                if torch.sum(sel) == 0:
+                    continue
+                temp = logits[i, sel, 1]
+                h = torch.argmax(temp)
+                lab = labels[i, sel]
+                hit1 += lab[h]
+    print(f'Hit@1:{hit1 / (256 * bsz*len(load))}')
 
 
 def get_ent2graph():
-    kg = open('./data/kb.txt')
-    ent2id = load_json('./data/ent2id.json')
-    csr = load_file('./data/csr')
-    csc = load_file('./data/csc')
+    kg = open('./data/metaQA/kb.txt')
+    ent2id = load_json('./data/metaQA/ent2id.json')
+    csr = load_file('./data/metaQA/csr')
+    csc = load_file('./data/metaQA/csc')
 
 
     ents = []
@@ -431,7 +386,7 @@ def get_ent2graph():
     idx = -1
     ent2graph[idx] = get_graph(idx, csr, csc)
 
-    save_file(ent2graph, './ent2graph_metaQA')
+    save_file(ent2graph, './data/metaQA/ent2graph_metaQA')
     return ent2graph
 
 
@@ -462,11 +417,10 @@ def get_ent2graph_2h():
 
 
 def get_ent2graph_50():
-    kg = list(open('./data/kb.txt'))[::2]
-    ent2id = load_json('./data/ent2id.json')
-    csr = load_file('./data/csr_0.5')
-    csc = load_file('./data/csc_0.5')
-
+    kg = list(open('./data/metaQA/kb.txt'))[::2]
+    ent2id = load_json('./data/metaQA/ent2id.json')
+    csr = load_file('./data/metaQA/csr_0.5')
+    csc = load_file('./data/metaQA/csc_0.5')
 
     ents = []
     for triple in tqdm(list(kg)):
@@ -483,7 +437,7 @@ def get_ent2graph_50():
     idx = -1
     ent2graph[idx] = get_graph(idx, csr, csc)
 
-    save_file(ent2graph, './ent2graph_metaQA_0.5')
+    save_file(ent2graph, './data/metaQA/ent2graph_metaQA_0.5')
     return ent2graph
 
 
@@ -534,10 +488,16 @@ if __name__ == '__main__':
                         help="Number of updates steps to accumulate before performing a backward/update pass.")
 
     args = parser.parse_args()
-
-    ent2graph = load_file('./ent2graph_metaQA')
+    seed = args.seed
+    set_seed(seed)
+    epoch = args.num_train_epochs
+    data_dir = args.data_dir
+    ent2graph = load_file(f'{data_dir}/ent2graph_metaQA')
     model = TrainModel()
-    # model.apply(weight_load)
-    # dataset = encode_text_hop1()
-    dataset = encode_text_hop1()
-    train(model, dataset, ent2graph)
+    dataset_train = encode_text_hop1('train', args)
+    dataset_dev = encode_text_hop1('dev', args)
+    dataset_test = encode_text_hop1('test', args)
+    for i in range(epoch):
+        train(model, dataset_train, ent2graph, args)
+        eval(model, dataset_dev, ent2graph, args)
+        eval(model, dataset_test, ent2graph, args)

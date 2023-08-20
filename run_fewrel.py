@@ -5,8 +5,7 @@ import evaluate
 from torch.utils.data import TensorDataset, DataLoader
 import dgl
 from model import FewRelTrainModel
-from line_graph_util import get_graph
-from util import save_file, load_file, get_csr, get_csc
+from util import save_file, load_file, get_csr, get_csc, get_graph
 import json
 import os
 from transformers import AutoTokenizer
@@ -34,7 +33,7 @@ class InputFeatures(object):
         self.label_id = label_id
 
 
-def convert_examples_to_features(examples, label_list, tokenizer):
+def convert_examples_to_features(examples, label_list, tokenizer, args):
     """Loads a data file into a list of `InputBatch`s."""
     label_list = sorted(label_list)
     label_map = {label: i for i, label in enumerate(label_list)}
@@ -44,27 +43,23 @@ def convert_examples_to_features(examples, label_list, tokenizer):
         ex_text_a = example.text_a[0]
         h, t = example.text_a[1]
         h_name = ex_text_a[h[1]:h[2]]
-        h_idx = h[0]
         t_name = ex_text_a[t[1]:t[2]]
-        t_idx = t[0]
         # Add [HD] and [TL], which are "#" and "$" respectively.
         if h[1] < t[1]:
             ex_text_a = ex_text_a[:h[1]] + "# " + h_name + " #" + ex_text_a[
                                                                   h[2]:t[1]] + "$ " + t_name + " $" + ex_text_a[t[2]:]
-            h_pos = len(tokenizer.encode(ex_text_a[:h[1]] + "# " + h_name))+2
+            h_pos = len(tokenizer.encode(ex_text_a[:h[1]] + "# " + h_name))+3
             t_pos = len(tokenizer.encode(ex_text_a[:h[1]] + "# " + h_name + " #" + ex_text_a[
-                                                                  h[2]:t[1]] + "$ " + t_name))+2
-            # print(h_pos)
-            # exit()
+                                                                  h[2]:t[1]] + "$ " + t_name))+3
         else:
             ex_text_a = ex_text_a[:t[1]] + "$ " + t_name + " $" + ex_text_a[
                                                                   t[2]:h[1]] + "# " + h_name + " #" + ex_text_a[h[2]:]
             h_pos = len(tokenizer.encode(ex_text_a[:t[1]] + "$ " + t_name + " $" + ex_text_a[
-                                                                  t[2]:h[1]] + "# " + h_name))+2
-            t_pos = len(tokenizer.encode(ex_text_a[:t[1]] + "$ " + t_name))+2
+                                                                  t[2]:h[1]] + "# " + h_name))+3
+            t_pos = len(tokenizer.encode(ex_text_a[:t[1]] + "$ " + t_name))+3
 
         ex_text_a = ' entity entity '+ex_text_a
-        input = tokenizer(ex_text_a, max_length=128, padding='max_length', truncation=True)
+        input = tokenizer(ex_text_a, max_length=args.max_seq_length, padding='max_length', truncation=True)
         label_id = label_map[example.label]
         features.append(
             InputFeatures(input_ids=input.input_ids,
@@ -73,7 +68,6 @@ def convert_examples_to_features(examples, label_list, tokenizer):
                           h_pos=h_pos,
                           t_pos=t_pos,
                           label_id=label_id))
-    # exit()
     return features
 
 
@@ -170,21 +164,19 @@ def data_transfer(ents, ent2graph):
     return dgl.batch(g_batch)
 
 
-def train(model, train_data, ent_data, ent2graph):
+def train(model, train_data, ent_data, ent2graph, args):
     device = 'cuda'
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     loss_print = 0
     ground_truth = []
     prediction = []
     accuracy_metric = evaluate.load("accuracy")
-    divide = 1
-
 
     model.train()
     dataset = TensorDataset(*train_data, *ent_data)
     accumulation_steps = 1
-    load = DataLoader(dataset, batch_size=32, shuffle=True)
+    load = DataLoader(dataset, batch_size=args.train_batch_size, shuffle=True)
     for idx, item in enumerate(tqdm(load)):
         item = [i.to(device) for i in item]
         input_ids, attention_mask, token_type_ids, h_pos, t_pos, _, head_id, tail_id, label = item
@@ -192,7 +184,6 @@ def train(model, train_data, ent_data, ent2graph):
         tail_id = data_transfer(tail_id, ent2graph).to(device)
         h_pos = h_pos.unsqueeze(dim=1)
         t_pos = t_pos.unsqueeze(dim=1)
-        # exit()
 
         res = model(input_ids, token_type_ids, attention_mask, label, head_id, tail_id, h_pos, t_pos)
         loss = res.loss / accumulation_steps
@@ -248,9 +239,9 @@ def eval_data(model, data, ent_data, ent2graph):
     print(result)
 
 
-def collect_train_triple():
+def collect_train_triple(args):
     all_triple = []
-    data = load_json(f'./data/fewrel/train.json')
+    data = load_json(f'{args.data_dir}/train.json')
     for item in data:
         head = item['ents'][0][0]
         tail = item['ents'][1][0]
@@ -259,9 +250,9 @@ def collect_train_triple():
     return all_triple
 
 
-def collect_eval_triple():
+def collect_eval_triple(args):
     all_triple = []
-    data = load_json(f'./data/fewrel/dev.json')
+    data = load_json(f'{args.data_dir}/dev.json')
     for item in data:
         head = item['ents'][0][0]
         tail = item['ents'][1][0]
@@ -270,9 +261,9 @@ def collect_eval_triple():
     return all_triple
 
 
-def collect_test_triple():
+def collect_test_triple(args):
     all_triple = []
-    data = load_json(f'./data/fewrel/test.json')
+    data = load_json(f'{args.data_dir}/test.json')
     for item in data:
         head = item['ents'][0][0]
         tail = item['ents'][1][0]
@@ -299,26 +290,26 @@ def collect_Q():
     return all_ent
 
 
-def get_ent2graph():
+def get_ent2graph(args):
     ent2id = load_json('../ent2id.json')
     ents = []
     csr = get_csr()
     csc = get_csc()
-    data = load_json(f'./data/fewrel/train.json')
+    data = load_json(f'{args.data_dir}/train.json')
     for item in data:
         head = item['ents'][0][0]
         tail = item['ents'][1][0]
         ents.append(head)
         ents.append(tail)
 
-    data = load_json(f'./data/fewrel/dev.json')
+    data = load_json(f'{args.data_dir}/dev.json')
     for item in data:
         head = item['ents'][0][0]
         tail = item['ents'][1][0]
         ents.append(head)
         ents.append(tail)
 
-    data = load_json(f'./data/fewrel/test.json')
+    data = load_json(f'{args.data_dir}/test.json')
     for item in data:
         head = item['ents'][0][0]
         tail = item['ents'][1][0]
@@ -329,21 +320,20 @@ def get_ent2graph():
     ent2graph = {}
     for e in tqdm(ents):
         ent2graph[ent2id.get(e, -1)] = get_graph(ent2id.get(e, -1), csr, csc)
-
-    save_file(ent2graph, './data/fewrel/ent2graph_fewrel')
+    # save_file(ent2graph, f'{args.data_dir}/ent2graph_fewrel')
     return ent2graph
 
 
-def get_text_data(tag='train'):
+def get_text_data(tag, args):
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     processor = FewrelProcessor()
     if tag == 'train':
-        train_examples, label_list = processor.get_train_examples('./data/fewrel/')
+        train_examples, label_list = processor.get_train_examples(args.data_dir)
     if tag == 'eval':
-        train_examples, label_list = processor.get_dev_examples('./data/fewrel/')
+        train_examples, label_list = processor.get_dev_examples(args.data_dir)
     if tag == 'test':
-        train_examples, label_list = processor.get_test_examples('./data/fewrel/')
-    train_features = convert_examples_to_features(train_examples, label_list, tokenizer)
+        train_examples, label_list = processor.get_test_examples(args.data_dir)
+    train_features = convert_examples_to_features(train_examples, label_list, tokenizer, args)
 
     all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
@@ -414,7 +404,7 @@ if __name__ == '__main__':
                         help="The initial learning rate for Adam.")
     parser.add_argument("--num_train_epochs",
                         default=3.0,
-                        type=float,
+                        type=int,
                         help="Total number of training epochs to perform.")
     parser.add_argument('--seed',
                         type=int,
@@ -427,33 +417,31 @@ if __name__ == '__main__':
     parser.add_argument('--threshold', type=float, default=.3)
 
     args = parser.parse_args()
-
-    print(args)
-    print(args.data_dir)
-    exit()
-
-
-    model = FewRelTrainModel()
-
-    rel2idx = load_json('./data/rel2id_wiki.json')
     ent2id = load_json('../ent2id.json')
-    ent2graph = load_file('./data/fewrel/ent2graph_fewrel')
+    rel2idx = load_json('./data/rel2id_wiki.json')
+    ent2graph = get_ent2graph(args)
+    model = FewRelTrainModel()
+    model.ent_embedding.load_state_dict(load_file('./param/graph_encoder'))
+    seed = args.seed
+    set_seed(seed)
 
-    triple = collect_train_triple()
+
+    triple = collect_train_triple(args)
     data = convert_triple_to_trainable_data(triple, ent2id, rel2idx)
 
-    triple = collect_eval_triple()
+    triple = collect_eval_triple(args)
     data_test = convert_triple_to_trainable_data(triple, ent2id, rel2idx)
 
-    triple = collect_test_triple()
+    triple = collect_test_triple(args)
     data_eval = convert_triple_to_trainable_data(triple, ent2id, rel2idx)
 
-    text_data_train = get_text_data('train')
-    text_data_eval = get_text_data('eval')
-    text_data_test = get_text_data('test')
+    text_data_train = get_text_data('train', args)
+    text_data_eval = get_text_data('eval', args)
+    text_data_test = get_text_data('test', args)
 
-    for i in range(15):
-        train(model, text_data_train, data, ent2graph)
+    epoch = args.num_train_epochs
+    for i in range(epoch):
+        train(model, text_data_train, data, ent2graph, args)
         eval_data(model, text_data_test, data_test, ent2graph)
         eval_data(model, text_data_eval, data_eval, ent2graph)
 

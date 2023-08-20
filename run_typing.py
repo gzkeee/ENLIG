@@ -1,12 +1,14 @@
-import random
-from util import load_file, save_file, load_json, get_csr, get_csc, save_json
+import json
+import os
+from util import load_file, save_file, load_json, get_csr, get_csc, save_json, get_graph
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 from tqdm import tqdm
 from model import OpenEntityTrainModel
-from line_graph_util import get_graph
 import dgl
 import argparse
+from transformers import AutoTokenizer, set_seed
+
 
 def accuracy(out, l):
     cnt = 0
@@ -45,6 +47,7 @@ def loose_macro(true, pred):
     recall = r / num_entities
     return precision, recall, f1(precision, recall)
 
+
 def loose_micro(true, pred):
     num_predicted_labels = 0.
     num_true_labels = 0.
@@ -61,76 +64,29 @@ def loose_micro(true, pred):
     return precision, recall, f1(precision, recall)
 
 
-# fewrel测评任务
-# 输入一个模型 测试该模型在fewrel任务上的结果
-def get_train_data():
-    return load_file('./data/OpenEntity/train')
-
-
-def get_eval_data():
-    return load_file('./data/OpenEntity/test')
-
-
-def train(model, data, ent_data, ent2graph):
+def train(model, data, ent_data, ent2graph, args):
     device = 'cuda'
-    bsz = 32
+    bsz = args.train_batch_size
+    lr = args.learning_rate
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     dataset = TensorDataset(*data, ent_data)
     load = DataLoader(dataset, batch_size=bsz, shuffle=True)
     model.train()
     for idx, item in enumerate(tqdm(load)):
         item = [i.to(device) for i in item]
-        input_ids, attention_mask, token_type_ids, label, ent = item
-        ent = data_transfer(ent, ent2graph, label).to(device)
-        res = model(input_ids, token_type_ids, attention_mask, label, ent)
+        input_ids, attention_mask, token_type_ids, pos, label, ent = item
+        ent = data_transfer(ent, ent2graph).to(device)
+        res = model(input_ids, token_type_ids, attention_mask, label, ent, pos)
         loss = res.loss
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
 
 
-def collect_train_ent(threshold, ent2id):
-    # ent2id = load_json('./data/ent2id.json')
-    train = load_json('./data/OpenEntity/train.json')
-    sel_ents = []
-    for item in train:
-        start = item['start']
-        end = item['end']
-        ents = item['ents']
-
-        target_ent = 'Q0'
-        for e in ents:
-            if e[1] >= start or e[2] <= end and e[3] > threshold:
-                target_ent = e[0]
-        sel_ents.append(ent2id.get(target_ent, -1))
-
-    print(len(sel_ents))
-    return sel_ents
-
-
-def collect_test_ent(threshold, ent2id):
-    # ent2id = load_json('./data/ent2id.json')
-    train = load_json('./data/OpenEntity/test.json')
-    sel_ents = []
-    for item in train:
-        start = item['start']
-        end = item['end']
-        ents = item['ents']
-
-        target_ent = 'Q0'
-        for e in ents:
-            if e[1] >= start or e[2] <= end and e[3] > threshold:
-                target_ent = e[0]
-        sel_ents.append(ent2id.get(target_ent, -1))
-
-    print(len(sel_ents))
-    return sel_ents
-
-
-def eval_data(model, data, ent_data, ent2graph):
+def eval_data(model, data, ent_data, ent2graph, args):
     device = 'cuda'
-    bsz = 16
+    bsz = args.train_batch_size
     model = model.to(device)
     dataset = TensorDataset(*data, ent_data)
     load = DataLoader(dataset, batch_size=bsz)
@@ -141,9 +97,9 @@ def eval_data(model, data, ent_data, ent2graph):
     # model.eval()
     for idx, item in enumerate(tqdm(load)):
         item = [i.to(device) for i in item]
-        input_ids, attention_mask, token_type_ids, labels, ent = item
-        ent = data_transfer(ent, ent2graph, labels).to(device)
-        res = model(input_ids, token_type_ids, attention_mask, labels, ent)
+        input_ids, attention_mask, token_type_ids, pos, labels, ent = item
+        ent = data_transfer(ent, ent2graph).to(device)
+        res = model(input_ids, token_type_ids, attention_mask, labels, ent, pos)
 
         logits = res.logits.detach().cpu().numpy()
         labels = labels.to('cpu').numpy()
@@ -160,12 +116,34 @@ def eval_data(model, data, ent_data, ent2graph):
 
     result = {'eval_accuracy': eval_accuracy,
               'micro': loose_micro(true, pred),
-              'macro':loose_macro(true, pred)
+              'macro': loose_macro(true, pred)
               }
     print(result)
 
 
-def ent2link_graph(ents):
+def collect_ent(tag, threshold, ent2id, args):
+    if tag == 'train':
+        data = load_json(f'{args.data_dir}/train.json')
+    if tag == 'dev':
+        data = load_json(f'{args.data_dir}/dev.json')
+    if tag == 'test':
+        data = load_json(f'{args.data_dir}/test.json')
+
+    sel_ents = []
+    for item in data:
+        start = item['start']
+        end = item['end']
+        ents = item['ents']
+        target_ent = 'Q0'
+        for e in ents:
+            if e[1] >= start and e[2] <= end and e[3] > threshold:
+                target_ent = e[0]
+        sel_ents.append(ent2id.get(target_ent, -1))
+    sel_ents = torch.tensor(sel_ents).unsqueeze(dim=1)
+    return sel_ents
+
+
+def ent2line_graph(ents):
     csr = get_csr()
     csc = get_csc()
 
@@ -173,40 +151,18 @@ def ent2link_graph(ents):
     ent2graph = {}
     for e in tqdm(ents):
         ent2graph[e] = get_graph(e, csr, csc)
-
     save_file(ent2graph, './data/OpenEntity/ent2graph_OpenEntity')
     return ent2graph
 
 
-
-
 # 根据ent的id将实体转换为线图
-def data_transfer(ents, ent2graph, labels):
-    # print(labels)
-    # r = random.random()
-    # if r < 0.25:
-    #     for i in range(len(ents)):
-    #         if labels[i][0] == 1:
-    #             ents[i] = ent2id['Q6892981']
-    #         if labels[i][1] == 1:
-    #             ents[i] = list(ent2graph.keys())[90]
-    #         if labels[i][2] == 1:
-    #             ents[i] = list(ent2graph.keys())[100]
-    #         if labels[i][3] == 1:
-    #             ents[i] = list(ent2graph.keys())[110]
-    #         if labels[i][4] == 1:
-    #             ents[i] = list(ent2graph.keys())[120]
-    #         if labels[i][5] == 1:
-    #             ents[i] = list(ent2graph.keys())[130]
-    #         if labels[i][6] == 1:
-    #             ents[i] = list(ent2graph.keys())[140]
-    #         if labels[i][7] == 1:
-    #             ents[i] = list(ent2graph.keys())[150]
-
-    # exit()
+def data_transfer(ents, ent2graph):
+    g_ = dgl.graph([])
+    g_.ndata['idx'] = torch.tensor([], dtype=torch.int32)
+    g_.edata['idx'] = torch.tensor([], dtype=torch.int8)
     g_batch = []
     for e in ents:
-        g = ent2graph[int(e)]
+        g = ent2graph.get(int(e), g_)
         g_batch.append(g)
     return dgl.batch(g_batch)
 
@@ -241,6 +197,188 @@ def collect_Q():
     return sel_ents
 
 
+class InputFeatures(object):
+    """A single set of features of data."""
+    def __init__(self, input_ids, input_mask, segment_ids, h_pos, label_id):
+        self.input_ids = input_ids
+        self.input_mask = input_mask
+        self.segment_ids = segment_ids
+        self.h_pos = h_pos
+        self.label_id = label_id
+
+
+class InputExample(object):
+    """A single training/test example for simple sequence classification."""
+
+    def __init__(self, guid, text_a, text_b=None, label=None):
+        """Constructs a InputExample.
+
+        Args:
+            guid: Unique id for the example.
+            text_a: string. The untokenized text of the first sequence. For single
+            sequence tasks, only this sequence must be specified.
+            text_b: (Optional) string. The untokenized text of the second sequence.
+            Only must be specified for sequence pair tasks.
+            label: (Optional) string. The label of the example. This should be
+            specified for train and dev examples, but not for test examples.
+        """
+        self.guid = guid
+        self.text_a = text_a
+        self.text_b = text_b
+        self.label = label
+
+
+def convert_examples_to_features(examples, label_list, tokenizer, args):
+    """Loads a data file into a list of `InputBatch`s."""
+    label_list = sorted(label_list)
+    label_map = {label: i for i, label in enumerate(label_list)}
+
+    features = []
+    for (ex_index, example) in enumerate(examples):
+        ex_text_a = example.text_a[0]
+        h = example.text_a[1][0]
+        h_name = ex_text_a[h[1]:h[2]]
+        # ex_text_a = ex_text_a[:h[1]] + "@ " + ex_text_a[h[1]:h[2]] + " @" + ex_text_a[h[2]:]
+        begin, end = h[1:3]
+        # h[1] += 2
+        # h[2] += 2
+
+        # ex_text_a = example.text_a[0]
+        # h, t = example.text_a[1]
+        # h_name = ex_text_a[h[1]:h[2]]
+        # t_name = ex_text_a[t[1]:t[2]]
+        # Add [HD] and [TL], which are "#" and "$" respectively.
+        ex_text_a = ex_text_a[:h[1]] + "@ " + h_name + " @" + ex_text_a[h[2]:]
+        h_pos = len(tokenizer.encode(ex_text_a[:h[1]] + "@ " + h_name))+2
+
+        ex_text_a = ' entity '+ex_text_a
+        input = tokenizer(ex_text_a, max_length=args.max_seq_length, padding='max_length', truncation=True)
+
+        labels = [0] * 9
+        for l in example.label:
+            l = label_map[l]
+            labels[l] = 1
+
+
+
+        features.append(
+            InputFeatures(input_ids=input.input_ids,
+                          input_mask=input.attention_mask,
+                          segment_ids=input.token_type_ids,
+                          h_pos=h_pos,
+                          label_id=labels))
+    # print(label_list)
+    return features
+
+
+class DataProcessor(object):
+    """Base class for data converters for sequence classification data sets."""
+
+    def get_train_examples(self, data_dir):
+        """Gets a collection of `InputExample`s for the train set."""
+        raise NotImplementedError()
+
+    def get_dev_examples(self, data_dir):
+        """Gets a collection of `InputExample`s for the dev set."""
+        raise NotImplementedError()
+
+    def get_labels(self):
+        """Gets the list of labels for this data set."""
+        raise NotImplementedError()
+
+    @classmethod
+    def _read_json(cls, input_file):
+        with open(input_file, "r") as f:
+            return json.load(f)
+
+
+class TypingProcessor(DataProcessor):
+    """Processor for the MRPC data set (GLUE version)."""
+
+    def get_train_examples(self, data_dir):
+        examples = self._create_examples(
+            self._read_json(os.path.join(data_dir, "train.json")), "train")
+        d = {}
+        for e in examples:
+            for l in e.label:
+                if l in d:
+                    d[l] += 1
+                else:
+                    d[l] = 1
+        for k, v in d.items():
+            d[k] = (len(examples) - v) * 1. /v
+        return examples, list(d.keys()), d
+
+    def get_dev_examples(self, data_dir):
+        """See base class."""
+        examples = self._create_examples(
+            self._read_json(os.path.join(data_dir, "dev.json")), "dev")
+        d = {}
+        for e in examples:
+            for l in e.label:
+                if l in d:
+                    d[l] += 1
+                else:
+                    d[l] = 1
+        for k, v in d.items():
+            d[k] = (len(examples) - v) * 1. / v
+        return examples, list(d.keys()), d
+
+    def get_test_examples(self, data_dir):
+        """See base class."""
+        examples = self._create_examples(
+            self._read_json(os.path.join(data_dir, "test.json")), "test")
+        d = {}
+        for e in examples:
+            for l in e.label:
+                if l in d:
+                    d[l] += 1
+                else:
+                    d[l] = 1
+        for k, v in d.items():
+            d[k] = (len(examples) - v) * 1. / v
+        return examples, list(d.keys()), d
+
+    def get_labels(self):
+        """See base class."""
+        return ["0", "1"]
+
+    def _create_examples(self, lines, set_type):
+        """Creates examples for the training and dev sets."""
+        examples = []
+        for (i, line) in enumerate(lines):
+            guid = i
+            text_a = (line['sent'], [["SPAN", line["start"], line["end"]]])
+            text_b = line['ents']
+            label = line['labels']
+            #if guid != 51:
+            #    continue
+            examples.append(
+                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+        return examples
+
+def get_text_data(tag, args):
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    processor = TypingProcessor()
+    if tag == 'train':
+        train_examples, _, _ = processor.get_train_examples(args.data_dir)
+    if tag == 'dev':
+        train_examples, _, _ = processor.get_dev_examples(args.data_dir)
+    if tag == 'test':
+        train_examples, _, _ = processor.get_test_examples(args.data_dir)
+    label_list = processor.get_train_examples(args.data_dir)[1]
+    train_features = convert_examples_to_features(train_examples, label_list, tokenizer, args)
+
+    all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
+    all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
+    all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
+    all_h_pos = torch.tensor([f.h_pos for f in train_features], dtype=torch.long).unsqueeze(dim=1)
+    all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
+    text_data = [all_input_ids, all_input_mask, all_segment_ids, all_h_pos,
+                       all_label_ids]
+    return text_data
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
@@ -265,7 +403,7 @@ if __name__ == '__main__':
                         help="The initial learning rate for Adam.")
     parser.add_argument("--num_train_epochs",
                         default=3.0,
-                        type=float,
+                        type=int,
                         help="Total number of training epochs to perform.")
     parser.add_argument('--seed',
                         type=int,
@@ -278,39 +416,32 @@ if __name__ == '__main__':
     parser.add_argument('--threshold', type=float, default=.3)
 
     args = parser.parse_args()
+    thre = args.threshold
+    epoch = args.num_train_epochs
+    seed = args.seed
+
+    set_seed(seed)
+    print(args)
 
     ent2id = load_json('./data/ent2id_.json')
-    # print(ent2id[-1])
-    # exit()
+
     model = OpenEntityTrainModel()
-    thre = 0.
-    ent_train = collect_train_ent(thre, ent2id)
-    ent_test = collect_test_ent(thre, ent2id)
-    ent2link_graph(ent_train+ent_test)
-    ent2graph = load_file('./data/OpenEntity/ent2graph_OpenEntity')
-    data_train = get_train_data()
-    data_eval = get_eval_data()
+    model.ent_embedding.load_state_dict(load_file('./param/graph_encoder'))
 
+    ent_train = collect_ent('train', thre, ent2id, args)
+    ent_eval = collect_ent('dev', thre, ent2id, args)
+    ent_test = collect_ent('test', thre, ent2id, args)
+    print(ent_train.size())
+    all_ent = torch.cat([ent_train, ent_eval, ent_test])
+    ent2graph = ent2line_graph(all_ent)
 
-    ent_fewrel = set(load_file('./data/fewrel_ents'))
+    data_train = get_text_data('train', args)
+    data_eval = get_text_data('dev', args)
+    data_test = get_text_data('test', args)
 
-    ent_open = collect_Q()
-
-    label_train = data_train[-1]
-    label_eval = data_eval[-1]
-    labels = torch.cat([label_train, label_eval])
-    print(labels.size())
-    save_json(ent2id, './ent2id.json')
-
-    ent_train = collect_train_ent(thre, ent2id)
-    ent_test = collect_test_ent(thre, ent2id)
-    ent_train = torch.tensor(ent_train).unsqueeze(dim=1)
-    ent_test = torch.tensor(ent_test).unsqueeze(dim=1)
-
-    epoch = 15
     for i in range(epoch):
-        train(model, data_train, ent_train, ent2graph)
-        eval_data(model, data_eval, ent_test, ent2graph)
-        eval_data(model, data_eval, ent_test, ent2graph)
+        train(model, data_train, ent_train, ent2graph, args)
+        eval_data(model, data_eval, ent_eval, ent2graph, args)
+        eval_data(model, data_test, ent_test, ent2graph, args)
 
 
